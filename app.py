@@ -290,36 +290,46 @@ def get_indicators():
         except Exception as e:
             errors.append(f"CoinGecko market_chart: {e}")
 
-    # Candles semanais com limite alto para ter EMA50/200 semanal correta
-    for wlimit in [500, 300, 200]:
-        try:
-            r = requests.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1w", "limit": wlimit},
-                headers=HEADERS, timeout=30
-            )
-            if r.status_code == 200:
-                raw = r.json()
-                if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                    closes_w = [float(c[4]) for c in raw]
-                    if len(closes_w) >= 50:
-                        break
-        except Exception as e:
-            errors.append(f"Binance semanal limit={wlimit}: {e}")
+    # Candles semanais — busca máximo histórico para SMA200 semanal correta
+    # Binance tem dados desde 2017, precisamos de 200+ semanas = ~4 anos
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1w", "limit": 1000},
+            headers=HEADERS, timeout=30
+        )
+        if r.status_code == 200:
+            raw = r.json()
+            if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+                closes_w = [float(c[4]) for c in raw]
+    except Exception as e:
+        errors.append(f"Binance semanal: {e}")
 
-    # Fallback semanal via CoinGecko
-    if len(closes_w) < 50:
+    # Fallback: CoinGecko com máximo de dias históricos (desde 2013)
+    if len(closes_w) < 200:
         try:
+            # CoinGecko max = "max" retorna dados diários históricos completos
             r = requests.get(
                 "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-                params={"vs_currency": "usd", "days": "1825", "interval": "weekly"},
+                params={"vs_currency": "usd", "days": "max", "interval": "weekly"},
                 headers=HEADERS, timeout=30
             )
             if r.status_code == 200:
                 d = r.json()
-                closes_w = [p[1] for p in d.get("prices", [])]
+                prices_w = [p[1] for p in d.get("prices", [])]
+                if len(prices_w) > len(closes_w):
+                    closes_w = prices_w
+                    errors.append(f"Semanal via CoinGecko: {len(closes_w)} candles")
         except Exception as e:
-            errors.append(f"CoinGecko semanal fallback: {e}")
+            errors.append(f"CoinGecko semanal: {e}")
+
+    # Segundo fallback: usar candles diários e reamostrar para semanal
+    if len(closes_w) < 200 and len(closes_d) >= 200:
+        # Agrupa candles diários em semanais (a cada 7 dias pega o último close)
+        closes_w_resampled = [closes_d[i] for i in range(6, len(closes_d), 7)]
+        if len(closes_w_resampled) > len(closes_w):
+            closes_w = closes_w_resampled
+            errors.append(f"Semanal reamostrado de diário: {len(closes_w)} candles")
 
     daily, weekly = {}, {}
     if len(closes_d) >= 9:
