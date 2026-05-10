@@ -290,45 +290,22 @@ def get_indicators():
         except Exception as e:
             errors.append(f"CoinGecko market_chart: {e}")
 
-    # Candles semanais — tenta múltiplas fontes com debug
-    weekly_debug = []
-
-    # Fonte 1: CoinGecko 2000 dias
+    # Candles semanais REAIS da Binance — fechamentos semanais exatos
+    # Fonte 1: Binance candles semanais reais (mais preciso, igual TradingView)
     try:
         r = requests.get(
-            "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-            params={"vs_currency": "usd", "days": "2000"},
-            headers=HEADERS, timeout=30
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1w", "limit": 1000},
+            headers=HEADERS, timeout=20
         )
-        weekly_debug.append(f"CoinGecko2000: status={r.status_code}")
         if r.status_code == 200:
-            d = r.json()
-            prices_daily = [p[1] for p in d.get("prices", [])]
-            weekly_debug.append(f"precos_diarios={len(prices_daily)}")
-            closes_w = [prices_daily[i] for i in range(6, len(prices_daily), 7)]
-            weekly_debug.append(f"closes_w={len(closes_w)}")
+            raw = r.json()
+            if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+                closes_w = [float(c[4]) for c in raw]
     except Exception as e:
-        weekly_debug.append(f"CoinGecko2000 erro: {e}")
+        errors.append(f"Binance semanal: {e}")
 
-    # Fonte 2: Binance 1w limit=1000
-    if len(closes_w) < 50:
-        try:
-            r = requests.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1w", "limit": 1000},
-                headers=HEADERS, timeout=20
-            )
-            weekly_debug.append(f"Binance1w: status={r.status_code}")
-            if r.status_code == 200:
-                raw = r.json()
-                weekly_debug.append(f"raw_type={type(raw).__name__} len={len(raw) if isinstance(raw,list) else 'n/a'}")
-                if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                    closes_w = [float(c[4]) for c in raw]
-                    weekly_debug.append(f"closes_w={len(closes_w)}")
-        except Exception as e:
-            weekly_debug.append(f"Binance1w erro: {e}")
-
-    # Fonte 3: Kraken semanal
+    # Fonte 2: Kraken semanal real (fechamentos semanais exatos)
     if len(closes_w) < 50:
         try:
             r = requests.get(
@@ -336,7 +313,6 @@ def get_indicators():
                 params={"pair": "XBTUSD", "interval": 10080},
                 headers=HEADERS, timeout=20
             )
-            weekly_debug.append(f"Kraken: status={r.status_code}")
             if r.status_code == 200:
                 d = r.json()
                 result = d.get("result", {})
@@ -344,11 +320,24 @@ def get_indicators():
                 if key:
                     ohlc = result[key[0]]
                     closes_w = [float(c[4]) for c in ohlc]
-                    weekly_debug.append(f"Kraken closes_w={len(closes_w)}")
         except Exception as e:
-            weekly_debug.append(f"Kraken erro: {e}")
+            errors.append(f"Kraken semanal: {e}")
 
-    errors.extend(weekly_debug)
+    # Fonte 3: CoinGecko reamostrado (menos preciso, último recurso)
+    if len(closes_w) < 50:
+        try:
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+                params={"vs_currency": "usd", "days": "2000"},
+                headers=HEADERS, timeout=30
+            )
+            if r.status_code == 200:
+                d = r.json()
+                prices_daily = [p[1] for p in d.get("prices", [])]
+                closes_w = [prices_daily[i] for i in range(6, len(prices_daily), 7)]
+                errors.append(f"Aviso: usando dados semanais reamostrados ({len(closes_w)} candles) — EMA pode divergir levemente do TradingView")
+        except Exception as e:
+            errors.append(f"CoinGecko semanal: {e}")
 
     daily = {}
     if len(closes_d) >= 9:
