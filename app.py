@@ -290,66 +290,47 @@ def get_indicators():
         except Exception as e:
             errors.append(f"CoinGecko market_chart: {e}")
 
-    # Candles semanais — busca em múltiplos lotes para garantir 200+ candles
-    # Binance permite startTime/endTime para buscar histórico completo
-    import time as time_mod
-    all_closes_w = []
+    # Candles semanais via CoinGecko — histórico completo reamostrado de diário
+    # Mais confiável que Binance para dados históricos longos
     try:
-        end_time = int(time_mod.time() * 1000)
-        # Busca em 2 lotes de 1000 semanas cada (cobre desde 2004, mais que suficiente)
-        for _ in range(3):
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+            params={"vs_currency": "usd", "days": "2000"},
+            headers=HEADERS, timeout=30
+        )
+        if r.status_code == 200:
+            d = r.json()
+            prices_daily = [p[1] for p in d.get("prices", [])]
+            # Reamostrar: pega fechamento a cada 7 dias (simula candle semanal)
+            closes_w = [prices_daily[i] for i in range(6, len(prices_daily), 7)]
+    except Exception as e:
+        errors.append(f"CoinGecko semanal: {e}")
+
+    # Fallback: Binance semanal direto
+    if len(closes_w) < 50:
+        try:
             r = requests.get(
                 "https://api.binance.com/api/v3/klines",
-                params={
-                    "symbol": "BTCUSDT",
-                    "interval": "1w",
-                    "limit": 1000,
-                    "endTime": end_time
-                },
-                headers=HEADERS, timeout=30
+                params={"symbol": "BTCUSDT", "interval": "1w", "limit": 1000},
+                headers=HEADERS, timeout=20
             )
             if r.status_code == 200:
                 raw = r.json()
                 if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                    batch = [(int(c[0]), float(c[4])) for c in raw]
-                    if not batch:
-                        break
-                    all_closes_w = batch + all_closes_w
-                    end_time = batch[0][0] - 1
-                    if len(all_closes_w) >= 500:
-                        break
-                else:
-                    break
-            else:
-                errors.append(f"Binance semanal: {r.status_code}")
-                break
-        closes_w = [c[1] for c in sorted(all_closes_w, key=lambda x: x[0])]
-    except Exception as e:
-        errors.append(f"Binance semanal lote: {e}")
-
-    # Fallback: CoinGecko histórico máximo
-    if len(closes_w) < 200:
-        try:
-            r = requests.get(
-                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-                params={"vs_currency": "usd", "days": "2000"},
-                headers=HEADERS, timeout=30
-            )
-            if r.status_code == 200:
-                d = r.json()
-                prices_daily = [p[1] for p in d.get("prices", [])]
-                # Reamostrar: pega um ponto a cada 7 dias
-                closes_w_cg = [prices_daily[i] for i in range(0, len(prices_daily), 7)]
-                if len(closes_w_cg) > len(closes_w):
-                    closes_w = closes_w_cg
+                    closes_w = [float(c[4]) for c in raw]
         except Exception as e:
-            errors.append(f"CoinGecko semanal fallback: {e}")
+            errors.append(f"Binance semanal fallback: {e}")
 
-    daily = {}  # não exibido, mantido só para cálculo de cross
-    if len(closes_d) >= 50:
+    daily = {}
+    if len(closes_d) >= 9:
         daily = {
+            "EMA9":   calc_ema(closes_d, 9),
+            "EMA21":  calc_ema(closes_d, 21),
             "EMA50":  calc_ema(closes_d, 50),
+            "EMA100": calc_ema(closes_d, 100),
             "EMA200": calc_ema(closes_d, 200),
+            "SMA50":  calc_sma(closes_d, 50),
+            "SMA200": calc_sma(closes_d, 200),
         }
     weekly = {}
     if len(closes_w) >= 9:
@@ -420,6 +401,7 @@ def build_prompt(ind, macro, deriv):
             pos = "suporte" if p > val else "resistência"
             return f"  {name}: ${val:,.0f} ({pos}, {diff:+.1f}%)"
 
+        daily_lines  = "\n".join([fmt(k, v) for k, v in d.items() if v])
         weekly_lines = "\n".join([fmt(k, v) for k, v in w.items() if v])
 
         # Volume
@@ -523,6 +505,9 @@ Dias pós-halving abr/2024: {ind['days_post']} | Fase: {ind['phase']}
 Tendência MA: {ind['cross']}{vol_ctx}{dom_ctx}
 {macro_ctx}
 {deriv_ctx}
+
+MÉDIAS MÓVEIS DIÁRIAS (de {ind['candles_d']} candles reais):
+{daily_lines if daily_lines else "  Dados insuficientes"}
 
 MÉDIAS MÓVEIS SEMANAIS (de {ind['candles_w']} candles reais):
 {weekly_lines if weekly_lines else "  Dados insuficientes"}
@@ -664,19 +649,25 @@ if ind and "error" not in ind:
                   f"L:${deriv['liq_long_4h']}M S:${deriv.get('liq_short_4h',0)}M")
 
     # Médias móveis expandível
-    with st.expander("📊 Médias móveis semanais (Binance)"):
+    with st.expander("📊 Médias móveis reais (Binance)"):
+        col1, col2 = st.columns(2)
         p = ind["price"]
-        cols_ma = st.columns(3)
-        for idx, (name, val) in enumerate(ind["weekly"].items()):
-            if val:
-                diff = round((p - val) / val * 100, 1)
-                icon = "🟢" if p > val else "🔴"
-                pos  = "suporte" if p > val else "resistência"
-                cols_ma[idx % 3].metric(
-                    f"{icon} {name}",
-                    f"${val:,.0f}",
-                    f"{pos} ({diff:+.1f}%)"
-                )
+        with col1:
+            st.markdown("**Diárias**")
+            for name, val in ind["daily"].items():
+                if val:
+                    diff = round((p - val) / val * 100, 1)
+                    icon = "🟢" if p > val else "🔴"
+                    pos  = "suporte" if p > val else "resistência"
+                    st.markdown(f"{icon} **{name}:** ${val:,.0f} ({pos}, {diff:+.1f}%)")
+        with col2:
+            st.markdown("**Semanais**")
+            for name, val in ind["weekly"].items():
+                if val:
+                    diff = round((p - val) / val * 100, 1)
+                    icon = "🟢" if p > val else "🔴"
+                    pos  = "suporte" if p > val else "resistência"
+                    st.markdown(f"{icon} **{name}:** ${val:,.0f} ({pos}, {diff:+.1f}%)")
 
     st.caption(f"Atualizado às {ind['updated']} | {ind['candles_d']} candles diários, {ind['candles_w']} semanais")
 
