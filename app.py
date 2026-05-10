@@ -290,23 +290,27 @@ def get_indicators():
         except Exception as e:
             errors.append(f"CoinGecko market_chart: {e}")
 
-    # Candles semanais via CoinGecko — histórico completo reamostrado de diário
-    # Mais confiável que Binance para dados históricos longos
+    # Candles semanais — tenta múltiplas fontes com debug
+    weekly_debug = []
+
+    # Fonte 1: CoinGecko 2000 dias
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
             params={"vs_currency": "usd", "days": "2000"},
             headers=HEADERS, timeout=30
         )
+        weekly_debug.append(f"CoinGecko2000: status={r.status_code}")
         if r.status_code == 200:
             d = r.json()
             prices_daily = [p[1] for p in d.get("prices", [])]
-            # Reamostrar: pega fechamento a cada 7 dias (simula candle semanal)
+            weekly_debug.append(f"precos_diarios={len(prices_daily)}")
             closes_w = [prices_daily[i] for i in range(6, len(prices_daily), 7)]
+            weekly_debug.append(f"closes_w={len(closes_w)}")
     except Exception as e:
-        errors.append(f"CoinGecko semanal: {e}")
+        weekly_debug.append(f"CoinGecko2000 erro: {e}")
 
-    # Fallback: Binance semanal direto
+    # Fonte 2: Binance 1w limit=1000
     if len(closes_w) < 50:
         try:
             r = requests.get(
@@ -314,12 +318,37 @@ def get_indicators():
                 params={"symbol": "BTCUSDT", "interval": "1w", "limit": 1000},
                 headers=HEADERS, timeout=20
             )
+            weekly_debug.append(f"Binance1w: status={r.status_code}")
             if r.status_code == 200:
                 raw = r.json()
+                weekly_debug.append(f"raw_type={type(raw).__name__} len={len(raw) if isinstance(raw,list) else 'n/a'}")
                 if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
                     closes_w = [float(c[4]) for c in raw]
+                    weekly_debug.append(f"closes_w={len(closes_w)}")
         except Exception as e:
-            errors.append(f"Binance semanal fallback: {e}")
+            weekly_debug.append(f"Binance1w erro: {e}")
+
+    # Fonte 3: Kraken semanal
+    if len(closes_w) < 50:
+        try:
+            r = requests.get(
+                "https://api.kraken.com/0/public/OHLC",
+                params={"pair": "XBTUSD", "interval": 10080},
+                headers=HEADERS, timeout=20
+            )
+            weekly_debug.append(f"Kraken: status={r.status_code}")
+            if r.status_code == 200:
+                d = r.json()
+                result = d.get("result", {})
+                key = [k for k in result.keys() if k != "last"]
+                if key:
+                    ohlc = result[key[0]]
+                    closes_w = [float(c[4]) for c in ohlc]
+                    weekly_debug.append(f"Kraken closes_w={len(closes_w)}")
+        except Exception as e:
+            weekly_debug.append(f"Kraken erro: {e}")
+
+    errors.extend(weekly_debug)
 
     daily = {}
     if len(closes_d) >= 9:
