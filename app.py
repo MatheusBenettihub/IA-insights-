@@ -8,7 +8,7 @@ st.set_page_config(page_title="Agente BTC", page_icon="₿", layout="centered")
 
 FEEDBACK_FILE = "feedbacks.json"
 
-for key, val in [("messages", []), ("feedbacks", []), ("indicators", None)]:
+for key, val in [("messages", []), ("feedbacks", [])]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -29,7 +29,11 @@ def save_feedbacks():
 
 load_feedbacks()
 
-# ── Cálculo de EMA ───────────────────────────────────────────────────────────
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json"
+}
+
 def calc_ema(closes, period):
     if len(closes) < period:
         return None
@@ -44,144 +48,189 @@ def calc_sma(closes, period):
         return None
     return round(sum(closes[-period:]) / period, 0)
 
-# ── Buscar candles reais da Binance e calcular indicadores ───────────────────
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_indicators():
+    errors = []
+
+    # ── Preço atual via CoinGecko ────────────────────────────────────────────
+    price, change_24h, volume_24h = None, None, None
     try:
-        # Candles diários — 300 candles para ter EMA200 precisa
-        r_daily = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 300},
-            timeout=15
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bitcoin", "vs_currencies": "usd",
+                    "include_24hr_change": "true", "include_24hr_vol": "true"},
+            headers=HEADERS, timeout=15
         )
-        daily = r_daily.json()
-        closes_d = [float(c[4]) for c in daily]
-
-        # Candles semanais — 100 semanas
-        r_weekly = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1w", "limit": 100},
-            timeout=15
-        )
-        weekly = r_weekly.json()
-        closes_w = [float(c[4]) for c in weekly]
-
-        # Preço atual
-        r_price = requests.get(
-            "https://api.binance.com/api/v3/ticker/24hr",
-            params={"symbol": "BTCUSDT"},
-            timeout=10
-        )
-        ticker = r_price.json()
-        price = float(ticker["lastPrice"])
-        change_24h = float(ticker["priceChangePercent"])
-        volume_24h = float(ticker["quoteVolume"])
-
-        # Volume médio 30 dias
-        vols_d = [float(c[7]) for c in daily]
-        vol_avg_30 = round(sum(vols_d[-30:]) / 30, 0)
-        vol_ratio = round(volume_24h / vol_avg_30, 2)
-
-        # Indicadores diários
-        ema9_d   = calc_ema(closes_d, 9)
-        ema21_d  = calc_ema(closes_d, 21)
-        ema50_d  = calc_ema(closes_d, 50)
-        ema100_d = calc_ema(closes_d, 100)
-        ema200_d = calc_ema(closes_d, 200)
-        sma50_d  = calc_sma(closes_d, 50)
-        sma200_d = calc_sma(closes_d, 200)
-
-        # Indicadores semanais
-        ema9_w  = calc_ema(closes_w, 9)
-        ema20_w = calc_ema(closes_w, 20)
-        ema21_w = calc_ema(closes_w, 21)
-        ema50_w = calc_ema(closes_w, 50)
-        sma20_w = calc_sma(closes_w, 20)
-
-        # Drawdown do ATH
-        ATH = 126198
-        dist_ath = round((price - ATH) / ATH * 100, 1)
-
-        # Fase do halving
-        halving = date(2024, 4, 19)
-        days_post = (date.today() - halving).days
-        if days_post < 180:   phase = "Pós-halving inicial (0-6m)"
-        elif days_post < 365: phase = "Acumulação pré-bull (6-12m)"
-        elif days_post < 548: phase = "Bull market histórico (12-18m)"
-        else:                 phase = "Topo / bear territory (18m+)"
-
-        # Tendência golden/death cross
-        cross = "Golden Cross ativo" if ema50_d and ema200_d and ema50_d > ema200_d else "Death Cross ativo"
-
-        return {
-            "price": price,
-            "change_24h": round(change_24h, 2),
-            "volume_24h": round(volume_24h / 1e6, 1),
-            "vol_avg_30d": round(vol_avg_30 / 1e6, 1),
-            "vol_ratio": vol_ratio,
-            "ATH": ATH,
-            "dist_ath": dist_ath,
-            "days_post": days_post,
-            "phase": phase,
-            "cross": cross,
-            "daily": {
-                "EMA9":   ema9_d,
-                "EMA21":  ema21_d,
-                "EMA50":  ema50_d,
-                "EMA100": ema100_d,
-                "EMA200": ema200_d,
-                "SMA50":  sma50_d,
-                "SMA200": sma200_d,
-            },
-            "weekly": {
-                "EMA9":  ema9_w,
-                "EMA20": ema20_w,
-                "EMA21": ema21_w,
-                "EMA50": ema50_w,
-                "SMA20": sma20_w,
-            },
-            "updated": datetime.now().strftime("%H:%M:%S")
-        }
+        if r.status_code == 200:
+            d = r.json()["bitcoin"]
+            price = float(d["usd"])
+            change_24h = round(float(d["usd_24h_change"]), 2)
+            volume_24h = round(float(d.get("usd_24h_vol", 0)) / 1e9, 2)
+        else:
+            errors.append(f"CoinGecko price: {r.status_code}")
     except Exception as e:
-        return {"error": str(e)}
+        errors.append(f"CoinGecko: {e}")
 
-# ── Prompt de sistema ────────────────────────────────────────────────────────
+    # ── Fallback: Binance para preço ─────────────────────────────────────────
+    if price is None:
+        try:
+            r = requests.get(
+                "https://api.binance.com/api/v3/ticker/24hr",
+                params={"symbol": "BTCUSDT"},
+                headers=HEADERS, timeout=15
+            )
+            if r.status_code == 200:
+                d = r.json()
+                price = float(d["lastPrice"])
+                change_24h = round(float(d["priceChangePercent"]), 2)
+                volume_24h = round(float(d["quoteVolume"]) / 1e9, 2)
+            else:
+                errors.append(f"Binance price: {r.status_code}")
+        except Exception as e:
+            errors.append(f"Binance price: {e}")
+
+    if price is None:
+        return {"error": "Não foi possível obter preço. Erros: " + " | ".join(errors)}
+
+    # ── Candles diários via Binance ──────────────────────────────────────────
+    closes_d, vols_d = [], []
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 220},
+            headers=HEADERS, timeout=20
+        )
+        if r.status_code == 200:
+            raw = r.json()
+            if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+                closes_d = [float(c[4]) for c in raw]
+                vols_d   = [float(c[7]) for c in raw]
+        else:
+            errors.append(f"Binance klines diário: {r.status_code}")
+    except Exception as e:
+        errors.append(f"Binance klines: {e}")
+
+    # ── Fallback candles: CoinGecko market_chart ─────────────────────────────
+    if len(closes_d) < 50:
+        try:
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+                params={"vs_currency": "usd", "days": "220", "interval": "daily"},
+                headers=HEADERS, timeout=20
+            )
+            if r.status_code == 200:
+                d = r.json()
+                closes_d = [p[1] for p in d.get("prices", [])]
+                vols_d   = [v[1] for v in d.get("total_volumes", [])]
+        except Exception as e:
+            errors.append(f"CoinGecko market_chart: {e}")
+
+    # ── Candles semanais via Binance ─────────────────────────────────────────
+    closes_w = []
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1w", "limit": 60},
+            headers=HEADERS, timeout=20
+        )
+        if r.status_code == 200:
+            raw = r.json()
+            if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+                closes_w = [float(c[4]) for c in raw]
+    except Exception as e:
+        errors.append(f"Binance klines semanal: {e}")
+
+    # ── Calcular indicadores ─────────────────────────────────────────────────
+    daily = {}
+    if len(closes_d) >= 9:
+        daily["EMA9"]   = calc_ema(closes_d, 9)
+        daily["EMA21"]  = calc_ema(closes_d, 21)
+        daily["EMA50"]  = calc_ema(closes_d, 50)
+        daily["EMA100"] = calc_ema(closes_d, 100)
+        daily["EMA200"] = calc_ema(closes_d, 200)
+        daily["SMA50"]  = calc_sma(closes_d, 50)
+        daily["SMA200"] = calc_sma(closes_d, 200)
+
+    weekly = {}
+    if len(closes_w) >= 9:
+        weekly["EMA9"]  = calc_ema(closes_w, 9)
+        weekly["EMA20"] = calc_ema(closes_w, 20)
+        weekly["EMA21"] = calc_ema(closes_w, 21)
+        weekly["EMA50"] = calc_ema(closes_w, 50)
+        weekly["SMA20"] = calc_sma(closes_w, 20)
+
+    vol_avg_30d = round(sum(vols_d[-30:]) / 30 / 1e9, 2) if len(vols_d) >= 30 else None
+    vol_ratio   = round(volume_24h / vol_avg_30d, 2) if (volume_24h and vol_avg_30d) else None
+
+    ATH = 126198
+    halving = date(2024, 4, 19)
+    days_post = (date.today() - halving).days
+    dist_ath  = round((price - ATH) / ATH * 100, 1)
+
+    if days_post < 180:   phase = "Pós-halving inicial (0-6m)"
+    elif days_post < 365: phase = "Acumulação pré-bull (6-12m)"
+    elif days_post < 548: phase = "Bull market histórico (12-18m)"
+    else:                 phase = "Topo / bear territory (18m+)"
+
+    ema50d  = daily.get("EMA50")
+    ema200d = daily.get("EMA200")
+    if ema50d and ema200d:
+        cross = "Golden Cross ativo" if ema50d > ema200d else "Death Cross ativo"
+    else:
+        cross = "Indefinido"
+
+    return {
+        "price": price, "change_24h": change_24h,
+        "volume_24h": volume_24h, "vol_avg_30d": vol_avg_30d, "vol_ratio": vol_ratio,
+        "ATH": ATH, "dist_ath": dist_ath, "days_post": days_post,
+        "phase": phase, "cross": cross,
+        "daily": daily, "weekly": weekly,
+        "candles_d": len(closes_d), "candles_w": len(closes_w),
+        "errors": errors,
+        "updated": datetime.now().strftime("%H:%M:%S")
+    }
+
 def build_prompt(ind):
     if not ind or "error" in ind:
         data_ctx = "Dados em tempo real indisponíveis."
     else:
         d = ind["daily"]
         w = ind["weekly"]
-        data_ctx = f"""DADOS EM TEMPO REAL (calculados dos candles reais da Binance — não invente outros valores):
+        p = ind["price"]
 
-Preço atual: ${ind['price']:,.0f}
-Variação 24h: {ind['change_24h']}%
-Volume 24h: ${ind['volume_24h']}M (média 30d: ${ind['vol_avg_30d']}M | ratio: {ind['vol_ratio']}x)
+        def fmt(name, val):
+            if not val: return ""
+            diff = round((p - val) / val * 100, 1)
+            pos = "suporte" if p > val else "resistência"
+            return f"  {name}: ${val:,.0f} ({pos}, {diff:+.1f}%)"
+
+        daily_lines  = "\n".join([fmt(k, v) for k, v in d.items() if v])
+        weekly_lines = "\n".join([fmt(k, v) for k, v in w.items() if v])
+
+        vol_ctx = ""
+        if ind.get("vol_ratio"):
+            sentiment = "acima da média (pressão compradora)" if ind["vol_ratio"] > 1.2 else \
+                        "abaixo da média (mercado apático)" if ind["vol_ratio"] < 0.8 else "dentro da média"
+            vol_ctx = f"\nVolume 24h: ${ind['volume_24h']}B (ratio {ind['vol_ratio']}x vs média 30d — {sentiment})"
+
+        data_ctx = f"""DADOS REAIS EM TEMPO REAL (calculados dos candles da Binance/CoinGecko):
+
+Preço: ${p:,.0f} | Variação 24h: {ind['change_24h']}%
 ATH: $126.198 (out/2025) | Distância: {ind['dist_ath']}%
 Dias pós-halving abr/2024: {ind['days_post']} | Fase: {ind['phase']}
-Tendência MA: {ind['cross']}
+Tendência MA: {ind['cross']}{vol_ctx}
 
-MÉDIAS MÓVEIS DIÁRIAS (calculadas dos candles reais):
-- EMA9:   ${d['EMA9']:,.0f}
-- EMA21:  ${d['EMA21']:,.0f}
-- EMA50:  ${d['EMA50']:,.0f}
-- EMA100: ${d['EMA100']:,.0f}
-- EMA200: ${d['EMA200']:,.0f}
-- SMA50:  ${d['SMA50']:,.0f}
-- SMA200: ${d['SMA200']:,.0f}
+MÉDIAS MÓVEIS DIÁRIAS (calculadas de {ind['candles_d']} candles reais):
+{daily_lines if daily_lines else "Insuficiente de dados"}
 
-MÉDIAS MÓVEIS SEMANAIS (calculadas dos candles reais):
-- EMA9:  ${w['EMA9']:,.0f}
-- EMA20: ${w['EMA20']:,.0f}
-- EMA21: ${w['EMA21']:,.0f}
-- EMA50: ${w['EMA50']:,.0f}
-- SMA20: ${w['SMA20']:,.0f}
+MÉDIAS MÓVEIS SEMANAIS (calculadas de {ind['candles_w']} candles reais):
+{weekly_lines if weekly_lines else "Insuficiente de dados"}
 
-REGRA CRÍTICA: Use APENAS os valores de médias acima. Nunca cite valores de médias que não estejam nessa lista. Se alguém perguntar por uma média que não está aqui, diga que não foi calculada."""
+REGRA CRÍTICA: Use APENAS esses valores de médias. Nunca cite valores que não estejam acima."""
 
     fb = ""
     if st.session_state.feedbacks:
-        fb = "\n\nFEEDBACKS ANTERIORES (aprenda com eles):\n"
+        fb = "\n\nFEEDBACKS REGISTRADOS (aprenda com eles):\n"
         for f in st.session_state.feedbacks[-10:]:
             s = "ACERTOU" if f["result"] == "correct" else "ERROU"
             fb += f"- {f['date']}: \"{f['query']}\" → {s}: {f['note']}\n"
@@ -190,7 +239,7 @@ REGRA CRÍTICA: Use APENAS os valores de médias acima. Nunca cite valores de m�
 
 {data_ctx}
 
-CICLOS HISTÓRICOS DO BTC:
+CICLOS HISTÓRICOS:
 - 2011: ATH $32 → queda 94%
 - 2013a: ATH $266 → queda 83%
 - 2013b: ATH $1.163 → queda 86%, bear 14 meses
@@ -209,16 +258,14 @@ PADRÕES PÓS-HALVING (média 3 ciclos anteriores):
 - 18-24m: euforia e topo, risco máximo
 - Pós-topo: bear 12-14 meses, queda média 80%
 
-REGRAS DE ANÁLISE:
-1. Use sempre os dados em tempo real como base — nunca invente valores
-2. Compare com análogos históricos específicos com datas e números reais
-3. Dê probabilidades numéricas baseadas em frequência histórica
-4. Identifique a fase do ciclo e o que aconteceu nela nos ciclos anteriores
-5. Seja direto — diga o que os dados sugerem, não o que o usuário quer ouvir
-6. Quantifique incertezas quando existirem
-7. Se o preço atual está acima de uma média, diga que é suporte; abaixo, resistência{fb}"""
+REGRAS:
+1. Use sempre os dados em tempo real — nunca invente valores
+2. Compare com análogos históricos com datas e números reais
+3. Probabilidades numéricas baseadas em frequência histórica
+4. Identifique a fase e o que aconteceu nela nos ciclos anteriores
+5. Seja direto — diga o que os dados sugerem
+6. Se uma média não está na lista, diga que não foi calculada{fb}"""
 
-# ── Enviar para API ──────────────────────────────────────────────────────────
 def send_message(api_key, user_msg, ind):
     try:
         msgs = [{"role": m["role"], "content": m["content"]}
@@ -243,7 +290,7 @@ def send_message(api_key, user_msg, ind):
         if r.status_code == 200:
             return r.json()["content"][0]["text"], None
         elif r.status_code == 401:
-            return None, "API key inválida. Verifique na barra lateral."
+            return None, "API key inválida. Crie uma nova em console.anthropic.com/settings/keys"
         elif r.status_code == 429:
             return None, "Limite atingido. Aguarde alguns segundos."
         else:
@@ -269,7 +316,7 @@ with st.sidebar:
 3. Avalie acertou/errou
 4. O agente aprende com os feedbacks""")
     st.divider()
-    if st.button("🔄 Atualizar indicadores"):
+    if st.button("🔄 Atualizar dados"):
         st.cache_data.clear()
         st.rerun()
     if st.button("🗑️ Limpar conversa"):
@@ -277,9 +324,8 @@ with st.sidebar:
         st.rerun()
 
 st.title("₿ Agente BTC")
-st.caption("Médias móveis calculadas dos candles reais da Binance — sem valores inventados")
+st.caption("Médias calculadas dos candles reais — sem valores inventados")
 
-# Carregar indicadores
 ind = get_indicators()
 
 if ind and "error" not in ind:
@@ -287,15 +333,14 @@ if ind and "error" not in ind:
     c1.metric("Preço", f"${ind['price']:,.0f}", f"{ind['change_24h']}% 24h")
     c2.metric("Dist. ATH", f"{ind['dist_ath']}%", "de $126.198")
     c3.metric("Pós-halving", f"{ind['days_post']}d", "abr/2024")
-    c4.metric("MA Trend", ind['cross'].split()[0], ind['cross'].split()[-1] if len(ind['cross'].split()) > 1 else "")
+    c4.metric("MA Trend", ind['cross'].split()[0], ind['cross'].split()[-1])
 
-    with st.expander("📊 Médias móveis reais (Binance)"):
+    with st.expander("📊 Médias móveis reais"):
         col1, col2 = st.columns(2)
+        p = ind["price"]
         with col1:
             st.markdown("**Diárias**")
-            d = ind["daily"]
-            p = ind["price"]
-            for name, val in d.items():
+            for name, val in ind["daily"].items():
                 if val:
                     diff = round((p - val) / val * 100, 1)
                     pos = "suporte" if p > val else "resistência"
@@ -303,22 +348,27 @@ if ind and "error" not in ind:
                     st.markdown(f"{icon} **{name}:** ${val:,.0f} ({pos}, {diff:+.1f}%)")
         with col2:
             st.markdown("**Semanais**")
-            w = ind["weekly"]
-            for name, val in w.items():
+            for name, val in ind["weekly"].items():
                 if val:
                     diff = round((p - val) / val * 100, 1)
                     pos = "suporte" if p > val else "resistência"
                     icon = "🟢" if p > val else "🔴"
                     st.markdown(f"{icon} **{name}:** ${val:,.0f} ({pos}, {diff:+.1f}%)")
-    st.caption(f"Dados atualizados às {ind.get('updated', '—')} | Volume 24h: ${ind['volume_24h']}M (ratio vs 30d: {ind['vol_ratio']}x)")
+
+    info = f"Atualizado às {ind['updated']} | {ind['candles_d']} candles diários, {ind['candles_w']} semanais"
+    if ind.get("vol_ratio"):
+        info += f" | Volume ratio: {ind['vol_ratio']}x"
+    st.caption(info)
+
+    if ind.get("errors"):
+        with st.expander("⚠️ Avisos"):
+            for e in ind["errors"]:
+                st.warning(e)
 elif ind and "error" in ind:
-    st.error(f"Erro ao carregar dados da Binance: {ind['error']}")
-else:
-    st.warning("Carregando dados...")
+    st.error(f"Erro ao carregar dados: {ind['error']}")
 
 st.divider()
 
-# Perguntas rápidas
 st.markdown("**Perguntas rápidas:**")
 perguntas = [
     "Qual a situação atual do BTC?",
@@ -334,7 +384,6 @@ for i, q in enumerate(perguntas):
     if cols[i % 3].button(q, key=f"q{i}", use_container_width=True):
         triggered = q
 
-# Histórico do chat
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -369,7 +418,6 @@ if st.session_state.feedbacks:
             cor = "green" if fb["result"] == "correct" else "red"
             st.markdown(f":{cor}[{icon}] **{fb['date']}** — _{fb['query']}_ → {fb['note']}")
 
-# Input
 prompt = st.chat_input("Pergunte qualquer coisa sobre o BTC...")
 final_prompt = triggered or prompt
 
