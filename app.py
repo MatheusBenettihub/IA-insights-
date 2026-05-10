@@ -290,46 +290,51 @@ def get_indicators():
         except Exception as e:
             errors.append(f"CoinGecko market_chart: {e}")
 
-    # Candles semanais — busca diários da Binance com startTime para ter histórico longo
-    # Binance diário funciona, então buscamos múltiplos lotes de 1000 dias
-    import time as _time
-    all_daily = []
+    # Candles semanais via Yahoo Finance — histórico completo desde 2014
+    # Yahoo Finance é mais permissivo com requests diretos
     try:
-        end_ms = int(_time.time() * 1000)
-        for _ in range(5):  # até 5000 dias = ~13 anos
+        import time as _time
+        end_ts = int(_time.time())
+        start_ts = end_ts - (1600 * 7 * 24 * 3600)  # ~1600 semanas atrás
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD",
+            params={
+                "interval": "1wk",
+                "period1": start_ts,
+                "period2": end_ts,
+                "range": "max"
+            },
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+                "Referer": "https://finance.yahoo.com"
+            },
+            timeout=30
+        )
+        if r.status_code == 200:
+            d = r.json()
+            quotes = d["chart"]["result"][0]["indicators"]["quote"][0]
+            closes_raw = quotes.get("close", [])
+            closes_w = [float(c) for c in closes_raw if c is not None]
+    except Exception as e:
+        errors.append(f"Yahoo Finance semanal: {e}")
+
+    # Fallback: Binance semanal direto
+    if len(closes_w) < 50:
+        try:
             r = requests.get(
                 "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1d", "limit": 1000, "endTime": end_ms},
+                params={"symbol": "BTCUSDT", "interval": "1w", "limit": 1000},
                 headers=HEADERS, timeout=20
             )
             if r.status_code == 200:
                 raw = r.json()
                 if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                    batch = [(int(c[0]), float(c[4])) for c in raw]
-                    all_daily = batch + all_daily
-                    end_ms = batch[0][0] - 1
-                    if len(all_daily) >= 2000:
-                        break
-                else:
-                    break
-            else:
-                break
-    except Exception as e:
-        errors.append(f"Binance diario lote: {e}")
+                    closes_w = [float(c[4]) for c in raw]
+        except Exception as e:
+            errors.append(f"Binance semanal: {e}")
 
-    # Agrupa em semanais: pega o fechamento de domingo (último dia da semana ISO)
-    if len(all_daily) > 200:
-        from datetime import datetime as _dt
-        weekly_map = {}
-        for ts, close in all_daily:
-            d = _dt.utcfromtimestamp(ts / 1000)
-            # Semana ISO: segunda=0, domingo=6
-            # Agrupamos pelo número da semana do ano
-            week_key = (d.isocalendar()[0], d.isocalendar()[1])
-            weekly_map[week_key] = close  # sobrescreve com o último dia da semana
-        closes_w = [v for k, v in sorted(weekly_map.items())]
-    
-    # Fallback: CoinGecko reamostrado
+    # Fallback final: CoinGecko reamostrado
     if len(closes_w) < 50:
         try:
             r = requests.get(
@@ -341,8 +346,9 @@ def get_indicators():
                 d = r.json()
                 prices_daily = [p[1] for p in d.get("prices", [])]
                 closes_w = [prices_daily[i] for i in range(6, len(prices_daily), 7)]
+                errors.append(f"Usando CoinGecko reamostrado: {len(closes_w)} semanas")
         except Exception as e:
-            errors.append(f"CoinGecko semanal fallback: {e}")
+            errors.append(f"CoinGecko fallback: {e}")
 
     daily = {}
     if len(closes_d) >= 9:
