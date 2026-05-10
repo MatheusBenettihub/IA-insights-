@@ -265,7 +265,7 @@ def get_indicators():
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 220},
+            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 1500},
             headers=HEADERS, timeout=20
         )
         if r.status_code == 200:
@@ -290,71 +290,18 @@ def get_indicators():
         except Exception as e:
             errors.append(f"CoinGecko market_chart: {e}")
 
-    # Candles semanais via Yahoo Finance — histórico completo desde 2014
-    # Yahoo Finance é mais permissivo com requests diretos
-    try:
-        import time as _time
-        end_ts = int(_time.time())
-        start_ts = end_ts - (1600 * 7 * 24 * 3600)  # ~1600 semanas atrás
-        r = requests.get(
-            "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD",
-            params={
-                "interval": "1wk",
-                "period1": start_ts,
-                "period2": end_ts,
-                "range": "max"
-            },
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json",
-                "Referer": "https://finance.yahoo.com"
-            },
-            timeout=30
-        )
-        if r.status_code == 200:
-            d = r.json()
-            result = d.get("chart", {}).get("result", [])
-            if result:
-                timestamps = result[0].get("timestamp", [])
-                quotes = result[0]["indicators"]["quote"][0]
-                closes_raw = quotes.get("close", [])
-                # Filtra None e verifica se são realmente semanais
-                pairs = [(t, c) for t, c in zip(timestamps, closes_raw) if c is not None]
-                closes_w = [c for t, c in pairs]
-                errors.append(f"Yahoo: {len(closes_w)} candles, primeiro={pairs[0][1] if pairs else 'n/a':.0f}, ultimo={pairs[-1][1] if pairs else 'n/a':.0f}")
-    except Exception as e:
-        errors.append(f"Yahoo Finance semanal: {e}")
-
-    # Fallback: Binance semanal direto
-    if len(closes_w) < 50:
-        try:
-            r = requests.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1w", "limit": 1000},
-                headers=HEADERS, timeout=20
-            )
-            if r.status_code == 200:
-                raw = r.json()
-                if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                    closes_w = [float(c[4]) for c in raw]
-        except Exception as e:
-            errors.append(f"Binance semanal: {e}")
-
-    # Fallback final: CoinGecko reamostrado
-    if len(closes_w) < 50:
-        try:
-            r = requests.get(
-                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-                params={"vs_currency": "usd", "days": "2000"},
-                headers=HEADERS, timeout=30
-            )
-            if r.status_code == 200:
-                d = r.json()
-                prices_daily = [p[1] for p in d.get("prices", [])]
-                closes_w = [prices_daily[i] for i in range(6, len(prices_daily), 7)]
-                errors.append(f"Usando CoinGecko reamostrado: {len(closes_w)} semanas")
-        except Exception as e:
-            errors.append(f"CoinGecko fallback: {e}")
+    # Candles semanais derivados dos diários — pega fechamento de domingo de cada semana
+    # Com 1500 diários teremos ~214 semanas, suficiente para SMA200 semanal
+    if len(closes_d) >= 14:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        now = _dt.now(_tz.utc)
+        weekly_map = {}
+        for i, close in enumerate(closes_d):
+            days_ago = len(closes_d) - 1 - i
+            day = now - _td(days=days_ago)
+            week_key = (day.isocalendar()[0], day.isocalendar()[1])
+            weekly_map[week_key] = close
+        closes_w = [v for k, v in sorted(weekly_map.items())]
 
     daily = {}
     if len(closes_d) >= 9:
