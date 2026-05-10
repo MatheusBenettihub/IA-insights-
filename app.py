@@ -262,33 +262,35 @@ def get_indicators():
 
     closes_d, vols_d, closes_w = [], [], []
 
+    # Fonte 1: CoinGecko com histórico máximo (1500+ dias gratuito)
     try:
         r = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 1500},
-            headers=HEADERS, timeout=20
+            "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+            params={"vs_currency": "usd", "days": "1500", "interval": "daily"},
+            headers=HEADERS, timeout=30
         )
         if r.status_code == 200:
-            raw = r.json()
-            if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                closes_d = [float(c[4]) for c in raw]
-                vols_d   = [float(c[7]) for c in raw]
+            d = r.json()
+            closes_d = [p[1] for p in d.get("prices", [])]
+            vols_d   = [v[1] for v in d.get("total_volumes", [])]
     except Exception as e:
-        errors.append(f"Binance klines diário: {e}")
+        errors.append(f"CoinGecko 1500d: {e}")
 
+    # Fonte 2: Binance como fallback
     if len(closes_d) < 50:
         try:
             r = requests.get(
-                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-                params={"vs_currency": "usd", "days": "220", "interval": "daily"},
+                "https://api.binance.com/api/v3/klines",
+                params={"symbol": "BTCUSDT", "interval": "1d", "limit": 1000},
                 headers=HEADERS, timeout=20
             )
             if r.status_code == 200:
-                d = r.json()
-                closes_d = [p[1] for p in d.get("prices", [])]
-                vols_d   = [v[1] for v in d.get("total_volumes", [])]
+                raw = r.json()
+                if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+                    closes_d = [float(c[4]) for c in raw]
+                    vols_d   = [float(c[7]) for c in raw]
         except Exception as e:
-            errors.append(f"CoinGecko market_chart: {e}")
+            errors.append(f"Binance fallback: {e}")
 
     # Candles semanais derivados dos diários — pega fechamento de domingo de cada semana
     # Com 1500 diários teremos ~214 semanas, suficiente para SMA200 semanal
