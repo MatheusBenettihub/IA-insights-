@@ -35,6 +35,9 @@ HEADERS = {
     "Accept": "application/json"
 }
 
+# CoinGecko API key do Streamlit Secrets
+CG_KEY = st.secrets.get("COINGECKO_KEY", "")
+
 def calc_ema(closes, period):
     if len(closes) < period:
         return None
@@ -226,10 +229,13 @@ def get_indicators():
     price, change_24h, volume_24h = None, None, None
 
     try:
+        cg_price_params = {"ids": "bitcoin", "vs_currencies": "usd",
+                    "include_24hr_change": "true", "include_24hr_vol": "true"}
+        if CG_KEY:
+            cg_price_params["x_cg_demo_api_key"] = CG_KEY
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "bitcoin", "vs_currencies": "usd",
-                    "include_24hr_change": "true", "include_24hr_vol": "true"},
+            params=cg_price_params,
             headers=HEADERS, timeout=15
         )
         if r.status_code == 200:
@@ -262,21 +268,26 @@ def get_indicators():
 
     closes_d, vols_d, closes_w = [], [], []
 
-    # Fonte 1: CoinGecko com histórico máximo (1500+ dias gratuito)
+    # Fonte 1: CoinGecko com key — histórico completo 1500 dias
+    cg_params_base = {"vs_currency": "usd", "days": "1500", "interval": "daily"}
+    if CG_KEY:
+        cg_params_base["x_cg_demo_api_key"] = CG_KEY
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-            params={"vs_currency": "usd", "days": "1500", "interval": "daily"},
+            params=cg_params_base,
             headers=HEADERS, timeout=30
         )
         if r.status_code == 200:
             d = r.json()
             closes_d = [p[1] for p in d.get("prices", [])]
             vols_d   = [v[1] for v in d.get("total_volumes", [])]
+        else:
+            errors.append(f"CoinGecko diário: {r.status_code}")
     except Exception as e:
-        errors.append(f"CoinGecko 1500d: {e}")
+        errors.append(f"CoinGecko diário: {e}")
 
-    # Fonte 2: Binance como fallback
+    # Fonte 2: Binance fallback
     if len(closes_d) < 50:
         try:
             r = requests.get(
