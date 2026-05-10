@@ -271,39 +271,60 @@ def get_indicators():
 
     closes_d, vols_d, closes_w = [], [], []
 
-    # Binance em múltiplos lotes de 200 dias para montar histórico completo
-    # Cada request busca 200 dias anteriores ao último timestamp
+    # Binance com startTime — vai do passado para o presente em lotes de 500
+    # startTime fixo desde jan/2020 garante histórico suficiente para SMA200
+    from datetime import datetime as _dt, timezone as _tz
     import time as _t
-    all_candles = []
-    end_time = None
-    for _ in range(8):  # 8 lotes x 200 = 1600 dias
+
+    # Tenta primeiro um request grande
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 1000},
+            headers=HEADERS, timeout=20
+        )
+        if r.status_code == 200:
+            raw = r.json()
+            if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+                closes_d = [float(c[4]) for c in raw]
+                vols_d   = [float(c[7]) for c in raw]
+    except Exception as e:
+        errors.append(f"Binance 1000: {e}")
+
+    # Se trouxe menos de 400, tenta com startTime desde 2019
+    if len(closes_d) < 400:
         try:
-            params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 200}
-            if end_time:
-                params["endTime"] = end_time
+            start_2019 = int(_dt(2019, 1, 1, tzinfo=_tz.utc).timestamp() * 1000)
             r = requests.get(
                 "https://api.binance.com/api/v3/klines",
-                params=params, headers=HEADERS, timeout=15
+                params={"symbol": "BTCUSDT", "interval": "1d",
+                        "startTime": start_2019, "limit": 1000},
+                headers=HEADERS, timeout=20
             )
             if r.status_code == 200:
                 raw = r.json()
                 if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                    all_candles = raw + all_candles
-                    end_time = int(raw[0][0]) - 1
-                    if len(all_candles) >= 1400:
-                        break
-                else:
-                    break
-            else:
-                errors.append(f"Binance lote: {r.status_code}")
-                break
+                    batch1 = raw
+                    # Pega o segundo lote a partir do último timestamp
+                    last_ts = int(batch1[-1][0]) + 1
+                    r2 = requests.get(
+                        "https://api.binance.com/api/v3/klines",
+                        params={"symbol": "BTCUSDT", "interval": "1d",
+                                "startTime": last_ts, "limit": 1000},
+                        headers=HEADERS, timeout=20
+                    )
+                    if r2.status_code == 200:
+                        raw2 = r2.json()
+                        if isinstance(raw2, list) and len(raw2) > 0:
+                            all_raw = batch1 + raw2
+                        else:
+                            all_raw = batch1
+                    else:
+                        all_raw = batch1
+                    closes_d = [float(c[4]) for c in all_raw]
+                    vols_d   = [float(c[7]) for c in all_raw]
         except Exception as e:
-            errors.append(f"Binance lote: {e}")
-            break
-
-    if all_candles:
-        closes_d = [float(c[4]) for c in all_candles]
-        vols_d   = [float(c[7]) for c in all_candles]
+            errors.append(f"Binance startTime: {e}")
 
     # Fallback CoinGecko com key
     if len(closes_d) < 50:
