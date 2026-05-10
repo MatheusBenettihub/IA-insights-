@@ -290,18 +290,36 @@ def get_indicators():
         except Exception as e:
             errors.append(f"CoinGecko market_chart: {e}")
 
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1w", "limit": 60},
-            headers=HEADERS, timeout=20
-        )
-        if r.status_code == 200:
-            raw = r.json()
-            if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                closes_w = [float(c[4]) for c in raw]
-    except Exception as e:
-        errors.append(f"Binance klines semanal: {e}")
+    # Candles semanais com limite alto para ter EMA50/200 semanal correta
+    for wlimit in [500, 300, 200]:
+        try:
+            r = requests.get(
+                "https://api.binance.com/api/v3/klines",
+                params={"symbol": "BTCUSDT", "interval": "1w", "limit": wlimit},
+                headers=HEADERS, timeout=30
+            )
+            if r.status_code == 200:
+                raw = r.json()
+                if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+                    closes_w = [float(c[4]) for c in raw]
+                    if len(closes_w) >= 50:
+                        break
+        except Exception as e:
+            errors.append(f"Binance semanal limit={wlimit}: {e}")
+
+    # Fallback semanal via CoinGecko
+    if len(closes_w) < 50:
+        try:
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+                params={"vs_currency": "usd", "days": "1825", "interval": "weekly"},
+                headers=HEADERS, timeout=30
+            )
+            if r.status_code == 200:
+                d = r.json()
+                closes_w = [p[1] for p in d.get("prices", [])]
+        except Exception as e:
+            errors.append(f"CoinGecko semanal fallback: {e}")
 
     daily, weekly = {}, {}
     if len(closes_d) >= 9:
@@ -316,11 +334,15 @@ def get_indicators():
         }
     if len(closes_w) >= 9:
         weekly = {
-            "EMA9":  calc_ema(closes_w, 9),
-            "EMA20": calc_ema(closes_w, 20),
-            "EMA21": calc_ema(closes_w, 21),
-            "EMA50": calc_ema(closes_w, 50),
-            "SMA20": calc_sma(closes_w, 20),
+            "EMA9":   calc_ema(closes_w, 9),
+            "EMA20":  calc_ema(closes_w, 20),
+            "EMA21":  calc_ema(closes_w, 21),
+            "EMA50":  calc_ema(closes_w, 50),
+            "EMA100": calc_ema(closes_w, 100),
+            "EMA200": calc_ema(closes_w, 200),
+            "SMA20":  calc_sma(closes_w, 20),
+            "SMA50":  calc_sma(closes_w, 50),
+            "SMA200": calc_sma(closes_w, 200),
         }
 
     vol_avg_30d = round(sum(vols_d[-30:]) / 30 / 1e9, 2) if len(vols_d) >= 30 else None
