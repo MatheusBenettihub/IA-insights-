@@ -35,8 +35,11 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# CoinGecko API key do Streamlit Secrets
-CG_KEY = st.secrets.get("COINGECKO_KEY", "")
+# CoinGecko API key
+try:
+    CG_KEY = st.secrets["COINGECKO_KEY"]
+except:
+    CG_KEY = ""
 
 def calc_ema(closes, period):
     if len(closes) < period:
@@ -268,40 +271,56 @@ def get_indicators():
 
     closes_d, vols_d, closes_w = [], [], []
 
-    # Fonte 1: CoinGecko com key — histórico completo 1500 dias
-    cg_params_base = {"vs_currency": "usd", "days": "1500", "interval": "daily"}
-    if CG_KEY:
-        cg_params_base["x_cg_demo_api_key"] = CG_KEY
-    try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-            params=cg_params_base,
-            headers=HEADERS, timeout=30
-        )
-        if r.status_code == 200:
-            d = r.json()
-            closes_d = [p[1] for p in d.get("prices", [])]
-            vols_d   = [v[1] for v in d.get("total_volumes", [])]
-        else:
-            errors.append(f"CoinGecko diário: {r.status_code}")
-    except Exception as e:
-        errors.append(f"CoinGecko diário: {e}")
-
-    # Fonte 2: Binance fallback
-    if len(closes_d) < 50:
+    # Binance em múltiplos lotes de 200 dias para montar histórico completo
+    # Cada request busca 200 dias anteriores ao último timestamp
+    import time as _t
+    all_candles = []
+    end_time = None
+    for _ in range(8):  # 8 lotes x 200 = 1600 dias
         try:
+            params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 200}
+            if end_time:
+                params["endTime"] = end_time
             r = requests.get(
                 "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1d", "limit": 1000},
-                headers=HEADERS, timeout=20
+                params=params, headers=HEADERS, timeout=15
             )
             if r.status_code == 200:
                 raw = r.json()
                 if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-                    closes_d = [float(c[4]) for c in raw]
-                    vols_d   = [float(c[7]) for c in raw]
+                    all_candles = raw + all_candles
+                    end_time = int(raw[0][0]) - 1
+                    if len(all_candles) >= 1400:
+                        break
+                else:
+                    break
+            else:
+                errors.append(f"Binance lote: {r.status_code}")
+                break
         except Exception as e:
-            errors.append(f"Binance fallback: {e}")
+            errors.append(f"Binance lote: {e}")
+            break
+
+    if all_candles:
+        closes_d = [float(c[4]) for c in all_candles]
+        vols_d   = [float(c[7]) for c in all_candles]
+
+    # Fallback CoinGecko com key
+    if len(closes_d) < 50:
+        try:
+            cg_params = {"vs_currency": "usd", "days": "365", "interval": "daily"}
+            if CG_KEY:
+                cg_params["x_cg_demo_api_key"] = CG_KEY
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+                params=cg_params, headers=HEADERS, timeout=30
+            )
+            if r.status_code == 200:
+                d = r.json()
+                closes_d = [p[1] for p in d.get("prices", [])]
+                vols_d   = [v[1] for v in d.get("total_volumes", [])]
+        except Exception as e:
+            errors.append(f"CoinGecko fallback: {e}")
 
     # Candles semanais derivados dos diários — pega fechamento de domingo de cada semana
     # Com 1500 diários teremos ~214 semanas, suficiente para SMA200 semanal
