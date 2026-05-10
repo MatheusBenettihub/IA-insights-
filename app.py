@@ -313,9 +313,15 @@ def get_indicators():
         )
         if r.status_code == 200:
             d = r.json()
-            quotes = d["chart"]["result"][0]["indicators"]["quote"][0]
-            closes_raw = quotes.get("close", [])
-            closes_w = [float(c) for c in closes_raw if c is not None]
+            result = d.get("chart", {}).get("result", [])
+            if result:
+                timestamps = result[0].get("timestamp", [])
+                quotes = result[0]["indicators"]["quote"][0]
+                closes_raw = quotes.get("close", [])
+                # Filtra None e verifica se são realmente semanais
+                pairs = [(t, c) for t, c in zip(timestamps, closes_raw) if c is not None]
+                closes_w = [c for t, c in pairs]
+                errors.append(f"Yahoo: {len(closes_w)} candles, primeiro={pairs[0][1] if pairs else 'n/a':.0f}, ultimo={pairs[-1][1] if pairs else 'n/a':.0f}")
     except Exception as e:
         errors.append(f"Yahoo Finance semanal: {e}")
 
